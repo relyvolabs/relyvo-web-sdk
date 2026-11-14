@@ -61,6 +61,9 @@ jobs:
           set +e
           npm publish --provenance --access public 2>&1 | tee /tmp/publish.log
           status=${PIPESTATUS[0]}
+          summary=$(grep -E 'npm notice (📦|Publishing|total files)|npm error' /tmp/publish.log | tr '\n' ' ' | cut -c1-500)
+          echo "::notice title=npm publish output::${summary}"
+
           if [ "${status}" -ne 0 ]; then
             detail=$(tail -n 6 /tmp/publish.log | tr '\n' ' ' | cut -c1-700)
             echo "::error title=npm publish failed::${detail}"
