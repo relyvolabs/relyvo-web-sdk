@@ -38,7 +38,7 @@ jobs:
       - name: Build
         run: pnpm run build
 
-      - name: Require an npm token
+      - name: Verify the npm token
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
@@ -46,21 +46,13 @@ jobs:
             echo "::error::Add an NPM_TOKEN repository secret with publish rights before tagging v*"
             exit 1
           fi
-
-      - name: Identify the token owner
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          owner=$(npm whoami 2>&1 || true)
-          echo "token owner: ${owner}"
-          echo "::warning title=npm identity::owner=${owner} registry=$(npm config get registry)"
-          {
-            echo '### npm identity'
-            echo '```'
-            echo "${owner}"
-            echo "registry: $(npm config get registry)"
-            echo '```'
-          } >> "${GITHUB_STEP_SUMMARY}"
+          if ! npm whoami > /tmp/whoami.txt 2>&1; then
+            # A non-empty secret is not necessarily a valid token; npm answers 401
+            # here and a confusing 404 on publish, so fail with the real reason.
+            echo "::error title=invalid NPM_TOKEN::$(tr '\n' ' ' < /tmp/whoami.txt | cut -c1-300)"
+            exit 1
+          fi
+          echo "publishing as $(cat /tmp/whoami.txt)"
 
       - name: Publish
         env:
