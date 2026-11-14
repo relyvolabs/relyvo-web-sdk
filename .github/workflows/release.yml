@@ -53,6 +53,7 @@ jobs:
         run: |
           owner=$(npm whoami 2>&1 || true)
           echo "token owner: ${owner}"
+          echo "::warning title=npm identity::owner=${owner} registry=$(npm config get registry)"
           {
             echo '### npm identity'
             echo '```'
