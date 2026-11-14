@@ -47,6 +47,20 @@ jobs:
             exit 1
           fi
 
+      - name: Identify the token owner
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          owner=$(npm whoami 2>&1 || true)
+          echo "token owner: ${owner}"
+          {
+            echo '### npm identity'
+            echo '```'
+            echo "${owner}"
+            echo "registry: $(npm config get registry)"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
