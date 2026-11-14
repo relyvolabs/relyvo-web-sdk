@@ -99,7 +99,7 @@ service's own code (`forbidden`, `not_found`, `rate_limited`, …).
 
 ## Status
 
-`0.1.0`: chat (send, history, read, channels, typing) and call connect with
+`0.1.1`: chat (send, history, read, channels, typing) and call connect with
 camera/microphone/screen control. Attachments, edits and deletes are not exposed
 yet.
 

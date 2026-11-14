@@ -1,6 +1,6 @@
 {
   "name": "@relyvolabs/web-sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Browser client SDK for Relyvo: realtime chat over Centrifugo and video calls over LiveKit, with no REST and no API key in the browser.",
   "license": "UNLICENSED",
   "type": "module",
@@ -40,14 +40,8 @@
     "test": "vitest run",
     "pack:check": "npm pack --dry-run"
   },
-  "peerDependencies": {
-    "centrifuge": ">=5",
-    "livekit-client": ">=2"
-  },
   "devDependencies": {
     "@types/node": "^22.10.2",
-    "centrifuge": "5.8.0",
-    "livekit-client": "2.23.0",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
@@ -59,5 +53,9 @@
     "onlyBuiltDependencies": [
       "esbuild"
     ]
+  },
+  "dependencies": {
+    "centrifuge": "^5.8.0",
+    "livekit-client": "^2.23.0"
   }
 }
