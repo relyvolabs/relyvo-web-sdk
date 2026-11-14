@@ -18,23 +18,47 @@ export interface CentrifugeSubscription {
   on(event: "publication" | "subscribed" | "error", handler: (ctx: any) => void): void;
 }
 
+/** Centrifuge fetches a replacement token through getToken when one expires. */
+export interface ConnectionTokenOptions {
+  token?: string;
+  getToken?: () => Promise<string>;
+}
+
+export interface SubscriptionTokenOptions {
+  token?: string;
+  getToken?: () => Promise<string>;
+}
+
 export interface CentrifugeClient {
   connect(): void;
   disconnect(): void;
   on(event: "connected" | "disconnected" | "error", handler: (ctx: any) => void): void;
-  newSubscription(channel: string, options: { token: string }): CentrifugeSubscription;
+  newSubscription(channel: string, options: SubscriptionTokenOptions): CentrifugeSubscription;
   rpc(method: string, data: unknown): Promise<{ data: unknown }>;
 }
 
-export type CentrifugeFactory = (wsUrl: string, options: { token: string }) => CentrifugeClient;
+export type CentrifugeFactory = (wsUrl: string, options: ConnectionTokenOptions) => CentrifugeClient;
 
 const defaultFactory: CentrifugeFactory = (wsUrl, options) =>
-  new Centrifuge(wsUrl, { token: options.token }) as unknown as CentrifugeClient;
+  new Centrifuge(wsUrl, {
+    token: options.token,
+    ...(options.getToken === undefined ? {} : { getToken: options.getToken }),
+  }) as unknown as CentrifugeClient;
 
 export interface RelyvoChatOptions {
   /** Injectable transport, used by tests. */
   createCentrifuge?: CentrifugeFactory;
   connectTimeoutMs?: number;
+  /**
+   * Called when the connection token expires. Return a fresh Centrifugo
+   * connection token from your backend; the transport reconnects by itself.
+   */
+  getConnectionToken?: () => Promise<string>;
+  /**
+   * Called when a subscription token expires. Receive the channel name and
+   * return a fresh subscription token for it.
+   */
+  getSubscriptionToken?: (channel: string) => Promise<string>;
 }
 
 type RpcEnvelope<T> = {
@@ -55,6 +79,7 @@ export class RelyvoChat {
 
   private readonly client: CentrifugeClient;
   private readonly connectTimeoutMs: number;
+  private readonly getSubscriptionToken?: (channel: string) => Promise<string>;
   private readonly handlers: { [K in keyof ChatEventHandler]: Set<ChatEventHandler[K]> } = {
     connected: new Set(),
     disconnected: new Set(),
@@ -68,8 +93,12 @@ export class RelyvoChat {
   constructor(credentials: ChatCredentials, options: RelyvoChatOptions = {}) {
     this.credentials = credentials;
     this.connectTimeoutMs = options.connectTimeoutMs ?? 10_000;
+    this.getSubscriptionToken = options.getSubscriptionToken;
     this.client = (options.createCentrifuge ?? defaultFactory)(credentials.wsUrl, {
       token: credentials.token,
+      ...(options.getConnectionToken === undefined
+        ? {}
+        : { getToken: options.getConnectionToken }),
     });
 
     this.client.on("connected", () => this.emit("connected"));
@@ -100,16 +129,21 @@ export class RelyvoChat {
     this.client.connect();
     await connected;
 
-    this.conversationSubscription = this.client.newSubscription(this.credentials.channel, {
-      token: this.credentials.subscriptionToken,
-    });
+    this.conversationSubscription = this.client.newSubscription(
+      this.credentials.channel,
+      this.subscriptionTokenOptions(this.credentials.channel, this.credentials.subscriptionToken),
+    );
     this.conversationSubscription.on("publication", (ctx) => this.handlePublication(ctx?.data));
     await this.conversationSubscription.subscribe();
 
     if (this.credentials.typingChannel && this.credentials.typingSubscriptionToken) {
-      this.typingSubscription = this.client.newSubscription(this.credentials.typingChannel, {
-        token: this.credentials.typingSubscriptionToken,
-      });
+      this.typingSubscription = this.client.newSubscription(
+        this.credentials.typingChannel,
+        this.subscriptionTokenOptions(
+          this.credentials.typingChannel,
+          this.credentials.typingSubscriptionToken,
+        ),
+      );
       this.typingSubscription.on("publication", (ctx) => this.handleTyping(ctx?.data));
       await this.typingSubscription.subscribe();
     }
@@ -170,6 +204,18 @@ export class RelyvoChat {
       throw new RelyvoError("invalid_credentials", "the channel name does not contain an id");
     }
     return id;
+  }
+
+  private subscriptionTokenOptions(
+    channel: string,
+    token: string,
+  ): SubscriptionTokenOptions {
+    return {
+      token,
+      ...(this.getSubscriptionToken === undefined
+        ? {}
+        : { getToken: () => this.getSubscriptionToken!(channel) }),
+    };
   }
 
   private async rpc<T>(method: string, data: unknown): Promise<T> {

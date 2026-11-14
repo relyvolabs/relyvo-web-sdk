@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  npm:
+    name: Publish @relyvolabs/web-sdk
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required for npm provenance.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.20.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Require an npm token
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            echo "::error::Add an NPM_TOKEN repository secret with publish rights before tagging v*"
+            exit 1
+          fi
+
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set +e
+          npm publish --provenance --access public 2>&1 | tee /tmp/publish.log
+          status=${PIPESTATUS[0]}
+          if [ "${status}" -ne 0 ]; then
+            detail=$(tail -n 6 /tmp/publish.log | tr '\n' ' ' | cut -c1-700)
+            echo "::error title=npm publish failed::${detail}"
+            { echo '### npm publish failed'; echo '```'; tail -n 40 /tmp/publish.log; echo '```'; } >> "${GITHUB_STEP_SUMMARY}"
+          fi
+          exit "${status}"

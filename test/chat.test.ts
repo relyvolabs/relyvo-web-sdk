@@ -12,7 +12,8 @@ function fakeCentrifuge(rpc: RpcHandler) {
   const state = {
     connected: false,
     rpcCalls: [] as { method: string; data: any }[],
-    subscriptions: [] as { channel: string; token: string }[],
+    subscriptions: [] as { channel: string; token: string; getToken?: () => Promise<string> }[],
+    connection: { token: "", getToken: undefined as undefined | (() => Promise<string>) },
     publications: [] as ((ctx: unknown) => void)[],
     connectedHandlers: [] as (() => void)[],
     disconnectCount: 0,
@@ -30,7 +31,11 @@ function fakeCentrifuge(rpc: RpcHandler) {
       if (event === "connected") state.connectedHandlers.push(handler as () => void);
     },
     newSubscription(channel, options) {
-      state.subscriptions.push({ channel, token: options.token });
+      state.subscriptions.push({
+        channel,
+        token: options.token ?? "",
+        getToken: options.getToken,
+      });
       return {
         subscribe: async () => {},
         unsubscribe: () => {},
@@ -47,7 +52,10 @@ function fakeCentrifuge(rpc: RpcHandler) {
 
   return {
     state,
-    factory: () => client,
+    factory: (_url: string, options: { token?: string; getToken?: () => Promise<string> }) => {
+      state.connection = { token: options.token ?? "", getToken: options.getToken };
+      return client;
+    },
     publish(payload: unknown) {
       for (const handler of state.publications) handler({ data: payload });
     },
@@ -72,7 +80,9 @@ describe("RelyvoChat", () => {
     await chat.connect();
 
     expect(fake.state.connected).toBe(true);
-    expect(fake.state.subscriptions).toEqual([{ channel: CHANNEL, token: "subscription-token" }]);
+    expect(fake.state.subscriptions).toEqual([
+      { channel: CHANNEL, token: "subscription-token", getToken: undefined },
+    ]);
   });
 
   it("subscribes to the typing sibling when credentials include it", async () => {
@@ -84,7 +94,7 @@ describe("RelyvoChat", () => {
 
     await chat.connect();
 
-    expect(fake.state.subscriptions).toEqual([
+    expect(fake.state.subscriptions.map(({ channel, token }) => ({ channel, token }))).toEqual([
       { channel: CHANNEL, token: "subscription-token" },
       { channel: `${CHANNEL}:typing`, token: "typing-token" },
     ]);
@@ -193,6 +203,24 @@ describe("RelyvoChat", () => {
       name: "RelyvoError",
       code: "transport_error",
     });
+  });
+
+  it("hands refresh callbacks to the transport so expired tokens are replaced", async () => {
+    const fake = fakeCentrifuge(() => ({ data: { ok: true, data: {} } }));
+    const chat = new RelyvoChat(credentials(), {
+      createCentrifuge: fake.factory,
+      getConnectionToken: async () => "connection-token-2",
+      getSubscriptionToken: async (channel) => `subscription-2:${channel}`,
+    });
+    await chat.connect();
+
+    expect(fake.state.connection.token).toBe("connection-token");
+    expect(fake.state.connection.getToken).toBeTypeOf("function");
+    await expect(fake.state.connection.getToken?.()).resolves.toBe("connection-token-2");
+
+    const conversation = fake.state.subscriptions[0];
+    expect(conversation?.getToken).toBeTypeOf("function");
+    await expect(conversation?.getToken?.()).resolves.toBe(`subscription-2:${CHANNEL}`);
   });
 
   it("disconnects the transport", async () => {

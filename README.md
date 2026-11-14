@@ -52,6 +52,27 @@ scope come from the connection token; the SDK never sends a project or user id.
 Methods: `connect()`, `on(event, handler)`, `send()`, `history()`, `markRead()`,
 `channels()`, `disconnect()`.
 
+### Token refresh
+
+Connection and subscription tokens are short-lived. Give the SDK callbacks that
+ask your backend for replacement tokens; the transport reconnects on its own.
+
+```ts
+const chat = new RelyvoChat(credentials, {
+  getConnectionToken: async () => {
+    const response = await fetch("/api/chat/token");
+    return (await response.json()).token;
+  },
+  getSubscriptionToken: async (channel) => {
+    const response = await fetch(`/api/chat/subscription?channel=${encodeURIComponent(channel)}`);
+    return (await response.json()).token;
+  },
+});
+```
+
+The callbacks run when a token expires, never before, and they must reach a
+server: a browser cannot mint these tokens.
+
 Events: `connected`, `disconnected`, `message`, `typing`, `error`.
 
 ### `RelyvoCall.connect({ serverUrl, token }, options?)`
