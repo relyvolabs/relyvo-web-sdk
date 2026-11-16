@@ -34,8 +34,9 @@ export type {
   ChatMessage,
   ChatMessagePage,
   ChatMessageType,
+  ChatUnread,
   MessageEvent,
   TypingEvent,
 } from "./types.js";
 
-export const VERSION = "0.1.1";
+export const VERSION = "0.1.2";

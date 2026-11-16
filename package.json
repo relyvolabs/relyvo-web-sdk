@@ -1,6 +1,6 @@
 {
   "name": "@relyvolabs/web-sdk",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Browser client SDK for Relyvo: realtime chat over Centrifugo and video calls over LiveKit, with no REST and no API key in the browser.",
   "license": "UNLICENSED",
   "type": "module",

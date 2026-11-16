@@ -7,6 +7,7 @@ import type {
   ChatEventHandler,
   ChatMessage,
   ChatMessagePage,
+  ChatUnread,
   MessageEvent,
   TypingEvent,
 } from "./types.js";
@@ -178,6 +179,11 @@ export class RelyvoChat {
       ...(input.limit === undefined ? {} : { limit: input.limit }),
       ...(input.direction === undefined ? {} : { direction: input.direction }),
     });
+  }
+
+  /** Unread state for this channel, used by channel lists and badges. */
+  unread(): Promise<ChatUnread> {
+    return this.rpc("chat.unread", { channel_id: this.channelId });
   }
 
   /** Marks the channel read up to a message. */

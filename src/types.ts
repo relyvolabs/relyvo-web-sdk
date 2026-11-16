@@ -21,6 +21,14 @@ export interface ChatMessagePage {
   next_cursor?: string;
 }
 
+export interface ChatUnread {
+  channel_id: string;
+  last_seq: number;
+  last_read_seq: number;
+  unread_count: number;
+  has_unread: boolean;
+}
+
 export interface ChatChannel {
   id: string;
   type: string;

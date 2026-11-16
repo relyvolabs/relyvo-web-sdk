@@ -223,6 +223,25 @@ describe("RelyvoChat", () => {
     await expect(conversation?.getToken?.()).resolves.toBe(`subscription-2:${CHANNEL}`);
   });
 
+  it("reads unread state for its channel", async () => {
+    const fake = fakeCentrifuge(() => ({
+      data: {
+        ok: true,
+        data: { channel_id: CHANNEL_ID, unread_count: 3, has_unread: true, last_seq: 10, last_read_seq: 7 },
+      },
+    }));
+    const chat = new RelyvoChat(credentials(), { createCentrifuge: fake.factory });
+    await chat.connect();
+
+    const unread = await chat.unread();
+
+    expect(unread.unread_count).toBe(3);
+    expect(fake.state.rpcCalls.at(-1)).toEqual({
+      method: "chat.unread",
+      data: { channel_id: CHANNEL_ID },
+    });
+  });
+
   it("disconnects the transport", async () => {
     const fake = fakeCentrifuge(() => ({ data: { ok: true, data: {} } }));
     const chat = new RelyvoChat(credentials(), { createCentrifuge: fake.factory });
