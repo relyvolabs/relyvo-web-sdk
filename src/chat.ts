@@ -3,8 +3,10 @@ import { Centrifuge } from "centrifuge";
 import { RelyvoError } from "./errors.js";
 import type {
   ChatChannel,
+  ChatChannelPage,
+  ChatReadState,
   ChatCredentials,
-  ChatEventHandler,
+  ChatExtendedEventHandler,
   ChatMessage,
   ChatMessagePage,
   ChatUnread,
@@ -18,7 +20,7 @@ export interface CentrifugeSubscription {
   /** Resolves when the server confirms the subscription, when supported. */
   ready?(timeout?: number): Promise<void>;
   unsubscribe(): void;
-  on(event: "publication" | "subscribed" | "error", handler: (ctx: any) => void): void;
+  on(event: "publication" | "subscribed" | "subscribing" | "unsubscribed" | "error", handler: (ctx: any) => void): void;
 }
 
 /** Centrifuge fetches a replacement token through getToken when one expires. */
@@ -35,7 +37,7 @@ export interface SubscriptionTokenOptions {
 export interface CentrifugeClient {
   connect(): void;
   disconnect(): void;
-  on(event: "connected" | "disconnected" | "error", handler: (ctx: any) => void): void;
+  on(event: "connecting" | "connected" | "disconnected" | "error", handler: (ctx: any) => void): void;
   newSubscription(channel: string, options: SubscriptionTokenOptions): CentrifugeSubscription;
   rpc(method: string, data: unknown): Promise<{ data: unknown }>;
 }
@@ -83,10 +85,18 @@ export class RelyvoChat {
   private readonly client: CentrifugeClient;
   private readonly connectTimeoutMs: number;
   private readonly getSubscriptionToken?: (channel: string) => Promise<string>;
-  private readonly handlers: { [K in keyof ChatEventHandler]: Set<ChatEventHandler[K]> } = {
+  private readonly handlers: { [K in keyof ChatExtendedEventHandler]: Set<ChatExtendedEventHandler[K]> } = {
     connected: new Set(),
     disconnected: new Set(),
     message: new Set(),
+    messageUpdated: new Set(),
+    messageDeleted: new Set(),
+    read: new Set(),
+    channelCreated: new Set(),
+    channelUpdated: new Set(),
+    channelDeleted: new Set(),
+    memberAdded: new Set(),
+    memberRemoved: new Set(),
     typing: new Set(),
     error: new Set(),
   };
@@ -97,7 +107,11 @@ export class RelyvoChat {
   private generation = 0;
   private cancelConnect?: (error: RelyvoError) => void;
   private connectionSucceeded?: () => void;
-  private connectionFailed?: (error: RelyvoError) => void;
+  private transportStarted = false;
+  private socketConnected = false;
+  private readinessEpoch = 0;
+  private subscriptionTerminalEpoch = 0;
+  private established = false;
 
   constructor(credentials: ChatCredentials, options: RelyvoChatOptions = {}) {
     this.credentials = credentials;
@@ -110,7 +124,15 @@ export class RelyvoChat {
         : { getToken: options.getConnectionToken }),
     });
 
+    this.client.on("connecting", () => {
+      if (!this.transportStarted) return;
+      this.socketConnected = false;
+      this.ready = false;
+      ++this.readinessEpoch;
+    });
     this.client.on("connected", () => {
+      if (!this.transportStarted) return;
+      this.socketConnected = true;
       this.connectionSucceeded?.();
       this.emit("connected");
     });
@@ -120,7 +142,6 @@ export class RelyvoChat {
     });
     this.client.on("error", (ctx) => {
       const error = new RelyvoError("transport_error", String(ctx?.error ?? "connection error"));
-      this.connectionFailed?.(error);
       this.emit("error", error);
     });
   }
@@ -130,7 +151,11 @@ export class RelyvoChat {
     if (this.ready) return;
     if (this.connecting) return this.connecting;
     const generation = ++this.generation;
-    const cancelled = new Promise<never>((_, reject) => { this.cancelConnect = reject; });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cancelled = new Promise<never>((_, reject) => {
+      this.cancelConnect = reject;
+      timer = setTimeout(() => reject(new RelyvoError("connect_timeout", "the realtime connection timed out")), this.connectTimeoutMs);
+    });
     // Defer transport callbacks until the shared operation has been installed.
     const operation = Promise.resolve().then(() =>
       this.generation === generation ? this.open(generation, cancelled) : cancelled,
@@ -139,6 +164,7 @@ export class RelyvoChat {
     try {
       await operation;
     } finally {
+      clearTimeout(timer);
       if (this.generation === generation) {
         this.connecting = undefined;
         this.cancelConnect = undefined;
@@ -147,64 +173,90 @@ export class RelyvoChat {
   }
 
   private async open(generation: number, cancelled: Promise<never>): Promise<void> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const connected = new Promise<void>((resolve, reject) => {
-      this.connectionSucceeded = resolve;
-      this.connectionFailed = reject;
-      timer = setTimeout(() => reject(new RelyvoError("connect_timeout", "the realtime connection timed out")), this.connectTimeoutMs);
-    });
     try {
-      const connection = Promise.race([connected, cancelled]);
-      try {
+      // Observe cancellation even when connect() throws synchronously.
+      void cancelled.catch(() => {});
+      if (!this.transportStarted) {
+        this.transportStarted = true;
         this.client.connect();
-      } catch (error) {
-        // The race is already observing cancellation; consume it if connect throws.
-        void connection.catch(() => {});
-        throw error;
       }
-      await connection;
-      this.assertCurrent(generation);
-      clearTimeout(timer);
-      this.connectionSucceeded = undefined;
-      this.connectionFailed = undefined;
-      if (!this.conversationSubscription) {
-        this.conversationSubscription = this.client.newSubscription(
-          this.credentials.channel,
-          this.subscriptionTokenOptions(this.credentials.channel, this.credentials.subscriptionToken),
-        );
-        this.conversationSubscription.on("publication", (ctx) => {
-          if (this.ready || this.connecting) this.handlePublication(ctx?.data);
-        });
-      }
-      await this.subscribe(this.conversationSubscription, cancelled, generation);
-      this.assertCurrent(generation);
-      if (this.credentials.typingChannel && this.credentials.typingSubscriptionToken) {
-        if (!this.typingSubscription) {
-          this.typingSubscription = this.client.newSubscription(
-            this.credentials.typingChannel,
-            this.subscriptionTokenOptions(this.credentials.typingChannel, this.credentials.typingSubscriptionToken),
+      while (true) {
+        if (!this.socketConnected) {
+          let resolveConnection: () => void = () => {};
+          const connected = new Promise<void>((resolve) => { resolveConnection = resolve; this.connectionSucceeded = resolve; });
+          await Promise.race([connected, cancelled]);
+          if (this.connectionSucceeded === resolveConnection) this.connectionSucceeded = undefined;
+        }
+        this.assertCurrent(generation);
+        if (!this.socketConnected) continue;
+        const epoch = this.readinessEpoch;
+        const terminalEpoch = this.subscriptionTerminalEpoch;
+        if (!this.conversationSubscription) {
+          this.conversationSubscription = this.client.newSubscription(
+            this.credentials.channel,
+            this.subscriptionTokenOptions(this.credentials.channel, this.credentials.subscriptionToken),
           );
-          this.typingSubscription.on("publication", (ctx) => {
-            if (this.ready || this.connecting) this.handleTyping(ctx?.data);
+          this.watchSubscription(this.conversationSubscription);
+          this.conversationSubscription.on("publication", (ctx) => {
+            if (this.transportStarted && this.socketConnected) this.handlePublication(ctx?.data);
           });
         }
-        await this.subscribe(this.typingSubscription, cancelled, generation);
-        this.assertCurrent(generation);
+        try {
+          await this.subscribe(this.conversationSubscription, cancelled, generation);
+          this.assertCurrent(generation);
+          if (this.credentials.typingChannel && this.credentials.typingSubscriptionToken) {
+            if (!this.typingSubscription) {
+              this.typingSubscription = this.client.newSubscription(
+                this.credentials.typingChannel,
+                this.subscriptionTokenOptions(this.credentials.typingChannel, this.credentials.typingSubscriptionToken),
+              );
+              this.watchSubscription(this.typingSubscription);
+              this.typingSubscription.on("publication", (ctx) => {
+                if (this.transportStarted && this.socketConnected) this.handleTyping(ctx?.data);
+              });
+            }
+            await this.subscribe(this.typingSubscription, cancelled, generation);
+            this.assertCurrent(generation);
+          }
+        } catch (error) {
+          this.assertCurrent(generation);
+          if (terminalEpoch === this.subscriptionTerminalEpoch && epoch !== this.readinessEpoch) continue;
+          throw error;
+        }
+        if (terminalEpoch !== this.subscriptionTerminalEpoch) {
+          throw new RelyvoError("transport_error", "the realtime subscription was refused");
+        }
+        if (!this.socketConnected || epoch !== this.readinessEpoch) continue;
+        this.ready = true;
+        this.established = true;
+        return;
       }
-      this.ready = true;
     } catch (error) {
-      if (this.generation === generation) {
+      if (this.generation === generation && !(this.established && error instanceof RelyvoError && error.code === "connect_timeout")) {
         try { this.disconnect(); } catch { /* Preserve the original connection failure. */ }
       }
       if (error instanceof RelyvoError) throw error;
       throw new RelyvoError("transport_error", "the realtime connection could not be established", error);
     } finally {
-      clearTimeout(timer);
-      if (this.generation === generation) {
-        this.connectionSucceeded = undefined;
-        this.connectionFailed = undefined;
-      }
+      if (this.generation === generation) this.connectionSucceeded = undefined;
     }
+  }
+
+  private watchSubscription(subscription: CentrifugeSubscription): void {
+    const invalidate = () => {
+      this.ready = false;
+      ++this.readinessEpoch;
+    };
+    subscription.on("subscribing", invalidate);
+    subscription.on("unsubscribed", (ctx) => {
+      invalidate();
+      ++this.subscriptionTerminalEpoch;
+      if (this.transportStarted) {
+        const error = new RelyvoError("transport_error", "the realtime subscription was refused", ctx);
+        this.cancelConnect?.(error);
+        this.emit("error", error);
+      }
+    });
   }
 
   private async subscribe(subscription: CentrifugeSubscription, cancelled: Promise<never>, generation: number): Promise<void> {
@@ -221,7 +273,7 @@ export class RelyvoChat {
     }
   }
 
-  on<K extends keyof ChatEventHandler>(event: K, handler: ChatEventHandler[K]): () => void {
+  on<K extends keyof ChatExtendedEventHandler>(event: K, handler: ChatExtendedEventHandler[K]): () => void {
     this.handlers[event].add(handler);
     return () => this.handlers[event].delete(handler);
   }
@@ -232,6 +284,8 @@ export class RelyvoChat {
     clientMessageId: string;
     type?: string;
     metadata?: Record<string, unknown>;
+    replyToMessageId?: string;
+    attachmentIds?: string[];
   }): Promise<{ message: ChatMessage; created: boolean }> {
     return this.rpc("chat.send", {
       channel_id: this.channelId,
@@ -239,14 +293,17 @@ export class RelyvoChat {
       content: input.content,
       type: input.type ?? "text",
       ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
+      ...(input.replyToMessageId === undefined ? {} : { reply_to_message_id: input.replyToMessageId }),
+      ...(input.attachmentIds === undefined ? {} : { attachment_ids: input.attachmentIds }),
     });
   }
 
-  /** Reads history backwards from a cursor, or forwards with `direction: "after"`. */
-  history(input: { before?: string; limit?: number; direction?: "before" | "after" } = {}): Promise<ChatMessagePage> {
+  /** Reads history with an opaque cursor. `before` remains an alias for compatibility. */
+  history(input: { cursor?: string; before?: string; limit?: number; direction?: "before" | "after" } = {}): Promise<ChatMessagePage> {
+    const cursor = input.cursor ?? input.before;
     return this.rpc("chat.history", {
       channel_id: this.channelId,
-      ...(input.before === undefined ? {} : { cursor: input.before }),
+      ...(cursor === undefined ? {} : { cursor }),
       ...(input.limit === undefined ? {} : { limit: input.limit }),
       ...(input.direction === undefined ? {} : { direction: input.direction }),
     });
@@ -259,12 +316,22 @@ export class RelyvoChat {
 
   /** Marks the channel read up to a message. */
   async markRead(messageId: string): Promise<void> {
-    await this.rpc("chat.read", { channel_id: this.channelId, message_id: messageId });
+    await this.markReadWithState(messageId);
+  }
+
+  /** Marks the channel read and returns the server's resulting read state. */
+  markReadWithState(messageId: string): Promise<ChatReadState> {
+    return this.rpc("chat.read", { channel_id: this.channelId, message_id: messageId });
   }
 
   /** Lists the channels this user belongs to. */
   channels(input: { cursor?: string; limit?: number } = {}): Promise<ChatChannel[]> {
-    return this.rpc<{ items: ChatChannel[] }>("chat.channels", input).then((page) => page.items ?? []);
+    return this.channelsPage(input).then((page) => page.items ?? []);
+  }
+
+  /** Lists channels with their opaque pagination cursor. */
+  channelsPage(input: { cursor?: string; limit?: number } = {}): Promise<ChatChannelPage> {
+    return this.rpc("chat.channels", input);
   }
 
   disconnect(): void {
@@ -277,14 +344,17 @@ export class RelyvoChat {
   }
 
   private stop(disconnectClient: boolean): void {
-    if (!this.ready && !this.connecting && !this.cancelConnect) return;
+    if (!this.transportStarted && !this.connecting && !this.cancelConnect) return;
     ++this.generation;
+    ++this.readinessEpoch;
+    this.transportStarted = false;
+    this.established = false;
+    this.socketConnected = false;
     this.ready = false;
     this.connecting = undefined;
     const cancel = this.cancelConnect;
     this.cancelConnect = undefined;
     this.connectionSucceeded = undefined;
-    this.connectionFailed = undefined;
     cancel?.(new RelyvoError("disconnected", "the realtime connection was closed"));
     try {
       this.conversationSubscription?.unsubscribe();
@@ -339,18 +409,41 @@ export class RelyvoChat {
   }
 
   private handlePublication(payload: any): void {
-    if (!payload || payload.type !== "chat.message.created") return;
-
-    const data = payload.data ?? {};
-    if (data.channel_id !== this.channelId || !data.message) return;
-
+    if (!payload || !payload.data || typeof payload.data !== "object") return;
+    const data = payload.data;
+    const metadata = {
+      ...(typeof payload.event_id === "string" ? { eventId: payload.event_id } : {}),
+      ...(typeof payload.occurred_at === "string" ? { occurredAt: payload.occurred_at } : {}),
+    };
+    const eventMetadata = Object.keys(metadata).length ? metadata : undefined;
+    if (payload.type === "chat.channel.created" || payload.type === "chat.channel.updated" || payload.type === "chat.channel.deleted") {
+      if (data.channel?.id !== this.channelId) return;
+      if (payload.type === "chat.channel.created") this.emit("channelCreated", data.channel, eventMetadata);
+      else this.emit(payload.type === "chat.channel.updated" ? "channelUpdated" : "channelDeleted", data.channel, eventMetadata);
+      return;
+    }
+    if (data.channel_id !== this.channelId) return;
+    if (payload.type === "chat.message.read") {
+      if (typeof data.user_id === "string" && typeof data.last_read_seq === "number" && typeof data.last_read_at === "string") this.emit("read", data, eventMetadata);
+      return;
+    }
+    if (payload.type === "chat.channel.member_added" || payload.type === "chat.channel.member_removed") {
+      if (!data.member || typeof data.member.id !== "string" || typeof data.role !== "string") return;
+      this.emit(payload.type === "chat.channel.member_added" ? "memberAdded" : "memberRemoved", data, eventMetadata);
+      return;
+    }
+    if (payload.type !== "chat.message.created" && payload.type !== "chat.message.updated" && payload.type !== "chat.message.deleted") return;
+    if (!data.message || typeof data.message.id !== "string") return;
     const event: MessageEvent = {
       message: data.message,
       channelId: data.channel_id,
       senderId: data.sender?.id ?? data.message.sender_id,
       senderName: data.sender?.display_name,
+      ...metadata,
     };
-    this.emit("message", event);
+    if (payload.type === "chat.message.created") this.emit("message", event);
+    else if (payload.type === "chat.message.updated") this.emit("messageUpdated", event);
+    else this.emit("messageDeleted", event);
   }
 
   private handleTyping(payload: any): void {
@@ -367,7 +460,7 @@ export class RelyvoChat {
     this.emit("typing", event);
   }
 
-  private emit<K extends keyof ChatEventHandler>(event: K, ...args: Parameters<ChatEventHandler[K]>): void {
+  private emit<K extends keyof ChatExtendedEventHandler>(event: K, ...args: Parameters<ChatExtendedEventHandler[K]>): void {
     for (const handler of this.handlers[event]) {
       (handler as (...values: unknown[]) => void)(...args);
     }

@@ -107,8 +107,9 @@ browser ──WS──► Centrifugo ──proxy──► chat-api ──► Pos
 ```
 
 `send`, `history`, `markRead` and `channels` all travel this path, so the browser
-never calls Relyvo REST and no CORS allowance is required. Identity and project
-scope come from the connection token; the SDK never sends a project or user id.
+never calls Relyvo REST and no REST CORS allowance is required. WebSocket origin
+restrictions still apply. Identity and project scope come from the connection
+token; the SDK never sends a project or user id.
 
 ## API
 
@@ -123,7 +124,12 @@ scope come from the connection token; the SDK never sends a project or user id.
 | `typingChannel` / `typingSubscriptionToken` | Optional typing sibling |
 
 Methods: `connect()`, `on(event, handler)`, `send()`, `history()`, `unread()`,
-`markRead()`, `channels()`, `disconnect()`, `dispose()` (alias).
+`markRead()`, `markReadWithState()`, `channels()`, `channelsPage()`,
+`disconnect()`, `dispose()` (alias). `channels()` retains its array result;
+`channelsPage({ cursor, limit })` returns `items`, `has_more`, and `next_cursor`.
+`send()` accepts optional `replyToMessageId` and `attachmentIds`; attachment IDs
+must already have been uploaded and completed via an authorized backend flow.
+The WebSocket RPC does not upload files, send typing, or edit/delete messages.
 
 ### Token refresh
 
@@ -146,7 +152,19 @@ const chat = new RelyvoChat(credentials, {
 The callbacks run when a token expires, never before, and they must reach a
 server: a browser cannot mint these tokens.
 
-Events: `connected`, `disconnected`, `message`, `typing`, `error`.
+Events: `connected`, `disconnected`, `message`, `messageUpdated`,
+`messageDeleted`, `read`, `channelCreated`, `channelUpdated`, `channelDeleted`, `memberAdded`,
+`memberRemoved`, `typing`, `error`. These are scoped to the subscribed
+conversation; channel creation can occur before subscription. Deletion events
+carry the pre-deletion object; use the event name as the deletion signal. For a
+message deletion, `senderId`/`senderName` can identify the moderator who deleted
+it rather than the original author; use `message.sender_id` for the author. A
+read event's message ID can be the requested ID even when the cursor did not
+advance. Durable deliveries may be repeated and can arrive out of order. Message
+callbacks receive optional `eventId` and `occurredAt` fields; read, channel and
+member callbacks receive optional metadata as their second argument. Use the event
+ID to deduplicate and reconcile authoritative history/state after reconnect; do
+not assume timestamps guarantee ordering.
 
 Chat coalesces concurrent `connect()` calls; `disconnect()` cancels an in-flight
 connection and cleans up its subscriptions. `dispose()` is an alias.

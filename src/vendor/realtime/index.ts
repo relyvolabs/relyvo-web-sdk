@@ -90,7 +90,7 @@ export class RealtimeChannel {
     this.publishing = true;
     this.transport.on("publication", (ctx: { data?: Publication }) => {
       const publication = ctx.data;
-      if (!publication?.event) return;
+      if (!this.active || !publication?.event) return;
       const handlers = this.listeners.get(publication.event);
       if (!handlers) return;
       for (const handler of [...handlers]) {
@@ -133,6 +133,7 @@ export class RelyvoRealtime {
   private currentStatus: RealtimeStatus = "idle";
   private connectPromise: Promise<void> | null = null;
   private cancelConnect: (() => void) | null = null;
+  private reconnectWait: { promise: Promise<void>; resolve: () => void; reject: (error: Error) => void } | null = null;
   private generation = 0;
 
   constructor(options: RelyvoRealtimeOptions) { this.options = options; }
@@ -152,6 +153,8 @@ export class RelyvoRealtime {
   async connect(): Promise<void> {
     if (this.currentStatus === "connected") return;
     if (this.connectPromise) return this.connectPromise;
+    // A live client in connecting state is already reconnecting automatically.
+    if (this.client && this.currentStatus === "connecting") return this.waitForReconnect();
     const generation = ++this.generation;
     this.setStatus("connecting");
     let rejectCancel!: (error: Error) => void;
@@ -176,10 +179,26 @@ export class RelyvoRealtime {
           timer = setTimeout(() => reject(new RelyvoRealtimeError("connect_timeout", "The realtime connection did not open in time.")), 10_000);
           client!.on("connected", () => {
             if (!current()) return;
-            this.setStatus("connected"); this.emitState("connected"); resolve();
+            this.setStatus("connected");
+            this.reconnectWait?.resolve();
+            this.emitState("connected"); resolve();
+          });
+          client!.on("connecting", () => {
+            if (current()) this.setStatus("connecting");
           });
           client!.on("disconnected", (ctx) => {
             if (!current()) return;
+            ++this.generation;
+            this.reconnectWait?.reject(this.cancelled());
+            this.cancelConnect?.();
+            this.cancelConnect = null;
+            this.connectPromise = null;
+            for (const pending of this.pending.values()) pending.cancel();
+            this.pending.clear();
+            for (const channel of this.channels.values()) channel.close();
+            this.channels.clear();
+            this.client = null;
+            this.credentials = null;
             this.setStatus("disconnected"); this.emitState("disconnected", ctx);
           });
           client!.on("error", (ctx) => {
@@ -210,6 +229,23 @@ export class RelyvoRealtime {
     })();
     this.connectPromise = work;
     try { await work; } finally { if (this.connectPromise === work) this.connectPromise = null; }
+  }
+
+  private waitForReconnect(): Promise<void> {
+    if (this.reconnectWait) return this.reconnectWait.promise;
+    let resolvePromise!: () => void;
+    let rejectPromise!: (error: Error) => void;
+    const promise = new Promise<void>((resolve, reject) => { resolvePromise = resolve; rejectPromise = reject; });
+    const finish = (error?: Error) => {
+      if (this.reconnectWait !== wait) return;
+      this.reconnectWait = null;
+      clearTimeout(timer);
+      if (error) rejectPromise(error); else resolvePromise();
+    };
+    const wait = { promise, resolve: () => finish(), reject: (error: Error) => finish(error) };
+    const timer = setTimeout(() => finish(new RelyvoRealtimeError("connect_timeout", "The realtime connection did not open in time.")), 10_000);
+    this.reconnectWait = wait;
+    return promise;
   }
 
   async subscribe(name: string): Promise<RealtimeChannel> {
@@ -278,6 +314,8 @@ export class RelyvoRealtime {
           client.removeSubscription?.(transport);
         });
         this.channels.set(name, channel);
+        // Centrifuge's unsubscribed state is terminal, unlike subscribing while retrying.
+        transport.on("unsubscribed", () => channel.close());
         this.log("info", "subscribed", { channel: name });
         return channel;
       } catch (error) {
@@ -308,6 +346,7 @@ export class RelyvoRealtime {
 
   async disconnect(): Promise<void> {
     ++this.generation;
+    this.reconnectWait?.reject(this.cancelled());
     this.cancelConnect?.();
     this.cancelConnect = null;
     this.connectPromise = null;

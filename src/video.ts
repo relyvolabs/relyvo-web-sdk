@@ -91,7 +91,7 @@ export class RelyvoCall {
 
     const call = new RelyvoCall(
       (options.createRoom ?? defaultFactory)(),
-      options.getDevices ?? ((kind) => Room.getLocalDevices(kind)),
+      options.getDevices ?? ((kind, requestPermissions) => Room.getLocalDevices(kind, requestPermissions)),
     );
 
     try {

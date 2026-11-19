@@ -121,6 +121,40 @@ describe("RelyvoChat", () => {
     });
   });
 
+  it("forwards reply and attachment IDs without changing omitted fields", async () => {
+    const fake = fakeCentrifuge(() => ({ data: { ok: true, data: { message: {}, created: true } } }));
+    const chat = new RelyvoChat(credentials(), { createCentrifuge: fake.factory });
+    await chat.send({ content: "", clientMessageId: "c", type: "attachment", replyToMessageId: "m1", attachmentIds: ["a1", "a2"] });
+    expect(fake.state.rpcCalls[0]).toEqual({ method: "chat.send", data: {
+      channel_id: CHANNEL_ID, client_message_id: "c", content: "", type: "attachment",
+      reply_to_message_id: "m1", attachment_ids: ["a1", "a2"],
+    } });
+  });
+
+  it("preserves page metadata and the legacy channels array", async () => {
+    const page = { items: [{ id: "c1" }], has_more: true, next_cursor: "opaque" };
+    const fake = fakeCentrifuge(() => ({ data: { ok: true, data: page } }));
+    const chat = new RelyvoChat(credentials(), { createCentrifuge: fake.factory });
+    await expect(chat.channelsPage({ cursor: "first", limit: 2 })).resolves.toEqual(page);
+    await expect(chat.channels()).resolves.toEqual(page.items);
+    expect(fake.state.rpcCalls).toEqual([
+      { method: "chat.channels", data: { cursor: "first", limit: 2 } },
+      { method: "chat.channels", data: {} },
+    ]);
+  });
+
+  it("returns read state only from the additive method", async () => {
+    const state = { channel_id: CHANNEL_ID, user_id: "u", last_read_seq: 8, last_read_at: "now" };
+    const fake = fakeCentrifuge(() => ({ data: { ok: true, data: state } }));
+    const chat = new RelyvoChat(credentials(), { createCentrifuge: fake.factory });
+    await expect(chat.markReadWithState("m1")).resolves.toEqual(state);
+    await expect(chat.markRead("m1")).resolves.toBeUndefined();
+    expect(fake.state.rpcCalls).toEqual([
+      { method: "chat.read", data: { channel_id: CHANNEL_ID, message_id: "m1" } },
+      { method: "chat.read", data: { channel_id: CHANNEL_ID, message_id: "m1" } },
+    ]);
+  });
+
   it("throws the service's code when the rpc envelope reports a failure", async () => {
     const fake = fakeCentrifuge(() => ({
       data: { ok: false, error: { code: "forbidden", message: "channel is read-only" } },
@@ -150,6 +184,14 @@ describe("RelyvoChat", () => {
     expect(fake.state.rpcCalls[1]?.data).toEqual({ channel_id: CHANNEL_ID, message_id: "m1" });
   });
 
+  it("supports both history cursor names and prefers cursor", async () => {
+    const fake = fakeCentrifuge(() => ({ data: { ok: true, data: { items: [], has_more: false } } }));
+    const chat = new RelyvoChat(credentials(), { createCentrifuge: fake.factory });
+    await chat.history({ before: "old" });
+    await chat.history({ before: "old", cursor: "new" });
+    expect(fake.state.rpcCalls.map(call => call.data.cursor)).toEqual(["old", "new"]);
+  });
+
   it("emits a message event only for its own channel", async () => {
     const fake = fakeCentrifuge(() => ({ data: { ok: true, data: {} } }));
     const chat = new RelyvoChat(credentials(), { createCentrifuge: fake.factory });
@@ -176,6 +218,43 @@ describe("RelyvoChat", () => {
     });
 
     expect(received).toEqual(["hello"]);
+  });
+
+  it("routes observed backend event shapes and ignores other channels", async () => {
+    const fake = fakeCentrifuge(() => ({ data: { ok: true, data: {} } }));
+    const chat = new RelyvoChat(credentials(), { createCentrifuge: fake.factory });
+    await chat.connect();
+    const seen: unknown[] = [];
+    chat.on("messageUpdated", e => seen.push(["updated", e]));
+    chat.on("messageDeleted", e => seen.push(["deleted", e]));
+    chat.on("channelCreated", e => seen.push(["channelCreated", e]));
+    chat.on("channelUpdated", e => seen.push(["channelUpdated", e]));
+    chat.on("channelDeleted", e => seen.push(["channelDeleted", e]));
+    chat.on("memberAdded", e => seen.push(["memberAdded", e]));
+    chat.on("memberRemoved", e => seen.push(["memberRemoved", e]));
+    chat.on("read", e => seen.push(["read", e]));
+    const message = { id: "m", sender_id: "author", channel_id: CHANNEL_ID };
+    const sender = { id: "actor", external_user_id: "e", display_name: "Ada" };
+    const channel = { id: CHANNEL_ID, type: "public", name: "n", last_seq: 1 };
+    const member = { channel_id: CHANNEL_ID, member: sender, role: "member" };
+    const read = { channel_id: CHANNEL_ID, user_id: "u", last_read_seq: 1, last_read_at: "now" };
+    fake.publish({ type: "chat.message.updated", data: { channel_id: CHANNEL_ID, message, sender } });
+    fake.publish({ type: "chat.message.deleted", data: { channel_id: CHANNEL_ID, message, sender } });
+    fake.publish({ type: "chat.channel.created", data: { channel } });
+    fake.publish({ type: "chat.channel.updated", data: { channel } });
+    fake.publish({ type: "chat.channel.deleted", data: { channel } });
+    fake.publish({ type: "chat.channel.member_added", data: member });
+    fake.publish({ type: "chat.channel.member_removed", data: member });
+    fake.publish({ type: "chat.message.read", data: read });
+    fake.publish({ type: "chat.message.read", data: { ...read, channel_id: "other" } });
+    fake.publish({ type: "chat.channel.updated", data: { channel: { ...channel, id: "other" } } });
+    fake.publish({ type: "chat.message.updated", data: { channel_id: CHANNEL_ID } });
+    expect(seen).toEqual([
+      ["updated", { message, channelId: CHANNEL_ID, senderId: "actor", senderName: "Ada" }],
+      ["deleted", { message, channelId: CHANNEL_ID, senderId: "actor", senderName: "Ada" }],
+      ["channelCreated", channel], ["channelUpdated", channel], ["channelDeleted", channel],
+      ["memberAdded", member], ["memberRemoved", member], ["read", read],
+    ]);
   });
 
   it("wraps a transport failure and does not leak a raw error", async () => {
@@ -396,6 +475,234 @@ describe("RelyvoChat", () => {
     await retry;
     expect(subscriptions).toBe(1);
     expect(disconnects).toBe(1);
+  });
+
+  it("awaits automatic reconnect and both recovered subscriptions without replacing them", async () => {
+    const handlers = new Map<string, (ctx: any) => void>();
+    const subscriptions: Array<{ events: Map<string, (ctx: any) => void>; ready: () => Promise<void>; resolve?: () => void }> = [];
+    let connects = 0;
+    let disconnects = 0;
+    let recovering = false;
+    const client: CentrifugeClient = {
+      on(event, handler) { handlers.set(event, handler); },
+      connect() { connects++; handlers.get("connected")?.({}); },
+      disconnect() { disconnects++; },
+      newSubscription() {
+        const sub = { events: new Map<string, (ctx: any) => void>(), ready: () => recovering
+          ? new Promise<void>((resolve) => { sub.resolve = resolve; }) : Promise.resolve(), resolve: undefined as undefined | (() => void) };
+        subscriptions.push(sub);
+        return { on(event, handler) { sub.events.set(event, handler); }, subscribe() {}, ready: sub.ready, unsubscribe() {} };
+      },
+      async rpc() { return { data: {} }; },
+    };
+    const chat = new RelyvoChat(credentials({ typingChannel: `${CHANNEL}:typing`, typingSubscriptionToken: "typing" }), { createCentrifuge: () => client });
+    await chat.connect();
+    recovering = true;
+    for (const sub of subscriptions) sub.events.get("subscribing")?.({});
+    handlers.get("connecting")?.({});
+    let settled = false;
+    const pending = Promise.all([chat.connect(), chat.connect()]).then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(disconnects).toBe(0);
+    handlers.get("connected")?.({});
+    await vi.waitFor(() => expect(subscriptions[0]!.resolve).toBeDefined());
+    subscriptions[0]!.resolve?.();
+    await vi.waitFor(() => expect(subscriptions[1]!.resolve).toBeDefined());
+    expect(settled).toBe(false);
+    subscriptions[1]!.resolve?.();
+    await pending;
+    expect(connects).toBe(1);
+    expect(subscriptions).toHaveLength(2);
+    chat.disconnect();
+  });
+
+  it("delivers publications after automatic recovery without another connect call", async () => {
+    const handlers = new Map<string, (ctx: any) => void>();
+    const publications: Array<(ctx: any) => void> = [];
+    const client: CentrifugeClient = {
+      on(event, handler) { handlers.set(event, handler); },
+      connect() { handlers.get("connected")?.({}); }, disconnect() {},
+      newSubscription() { return { on(event, handler) { if (event === "publication") publications.push(handler); }, subscribe() {}, unsubscribe() {} }; },
+      async rpc() { return { data: {} }; },
+    };
+    const chat = new RelyvoChat(credentials({ typingChannel: `${CHANNEL}:typing`, typingSubscriptionToken: "typing" }), { createCentrifuge: () => client });
+    const messages: string[] = [];
+    const typing: string[] = [];
+    chat.on("message", event => messages.push(event.message.id));
+    chat.on("typing", event => typing.push(event.user_id));
+    await chat.connect();
+    const message = { data: { type: "chat.message.created", data: { channel_id: CHANNEL_ID, message: { id: "m", sender_id: "u" } } } };
+    const typed = { data: { type: "chat.typing", data: { channel_id: CHANNEL_ID, user_id: "u" } } };
+    handlers.get("connecting")?.({});
+    publications[0]!(message);
+    expect(messages).toEqual([]);
+    handlers.get("connected")?.({});
+    publications[0]!(message);
+    publications[1]!(typed);
+    expect(messages).toEqual(["m"]);
+    expect(typing).toEqual(["u"]);
+    chat.disconnect();
+    publications[0]!(message);
+    expect(messages).toEqual(["m"]);
+  });
+
+  it("rechecks readiness when a transport loss occurs during subscription confirmation", async () => {
+    const handlers = new Map<string, (ctx: any) => void>();
+    const waiters: Array<() => void> = [];
+    let created = 0;
+    const client: CentrifugeClient = {
+      on(event, handler) { handlers.set(event, handler); }, connect() { handlers.get("connected")?.({}); }, disconnect() {},
+      newSubscription() { created++; return { on() {}, subscribe() {}, unsubscribe() {}, ready: () => new Promise<void>(resolve => waiters.push(resolve)) }; },
+      async rpc() { return { data: {} }; },
+    };
+    const chat = new RelyvoChat(credentials(), { createCentrifuge: () => client });
+    let settled = false;
+    const pending = chat.connect().then(() => { settled = true; });
+    await vi.waitFor(() => expect(waiters).toHaveLength(1));
+    handlers.get("connecting")?.({});
+    handlers.get("connected")?.({});
+    waiters[0]!();
+    await vi.waitFor(() => expect(waiters).toHaveLength(2));
+    expect(settled).toBe(false);
+    waiters[1]!();
+    await pending;
+    expect(created).toBe(1);
+    chat.disconnect();
+  });
+
+  it("surfaces terminal subscription denial instead of retrying it", async () => {
+    let connected: (ctx: any) => void = () => {};
+    let rejectReady: (reason: unknown) => void = () => {};
+    let unsubscribeEvent: (ctx: any) => void = () => {};
+    let subscribes = 0;
+    let disconnects = 0;
+    const client: CentrifugeClient = {
+      on(event, handler) { if (event === "connected") connected = handler; },
+      connect() { connected({}); }, disconnect() { disconnects++; },
+      newSubscription() { return {
+        on(event, handler) { if (event === "unsubscribed") unsubscribeEvent = handler; },
+        subscribe() { subscribes++; }, unsubscribe() {},
+        ready() { return new Promise<void>((_, reject) => { rejectReady = reject; }); },
+      }; },
+      async rpc() { return { data: {} }; },
+    };
+    const chat = new RelyvoChat(credentials(), { createCentrifuge: () => client });
+    const errors: Error[] = [];
+    chat.on("error", error => errors.push(error));
+    const pending = chat.connect();
+    const failed = expect(pending).rejects.toMatchObject({ code: "transport_error" });
+    await vi.waitFor(() => expect(subscribes).toBe(1));
+    rejectReady({ code: 1, message: "unsubscribed" });
+    unsubscribeEvent({ code: 403, reason: "permission denied" });
+    await failed;
+    expect(subscribes).toBe(1);
+    expect(disconnects).toBe(1);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ code: "transport_error", cause: { code: 403 } });
+  });
+
+  it("reports terminal subscription failure after an established connection", async () => {
+    let connected: (ctx: any) => void = () => {};
+    let unsubscribed: (ctx: any) => void = () => {};
+    const client: CentrifugeClient = {
+      on(event, handler) { if (event === "connected") connected = handler; }, connect() { connected({}); }, disconnect() {},
+      newSubscription() { return { on(event, handler) { if (event === "unsubscribed") unsubscribed = handler; }, subscribe() {}, unsubscribe() {} }; },
+      async rpc() { return { data: {} }; },
+    };
+    const chat = new RelyvoChat(credentials(), { createCentrifuge: () => client });
+    const errors: Error[] = [];
+    chat.on("error", error => errors.push(error));
+    await chat.connect();
+    unsubscribed({ code: 403, reason: "permission denied" });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ code: "transport_error", cause: { code: 403 } });
+    chat.disconnect();
+  });
+
+  it("times out a reconnect waiter without stopping the existing transport", async () => {
+    vi.useFakeTimers();
+    try {
+      const handlers = new Map<string, (ctx: any) => void>();
+      let disconnects = 0;
+      const client: CentrifugeClient = {
+        on(event, handler) { handlers.set(event, handler); }, connect() { handlers.get("connected")?.({}); },
+        disconnect() { disconnects++; }, newSubscription() { return { on() {}, subscribe() {}, unsubscribe() {} }; },
+        async rpc() { return { data: {} }; },
+      };
+      const chat = new RelyvoChat(credentials(), { createCentrifuge: () => client, connectTimeoutMs: 20 });
+      await chat.connect();
+      handlers.get("connecting")?.({});
+      const failure = expect(chat.connect()).rejects.toMatchObject({ code: "connect_timeout" });
+      await vi.advanceTimersByTimeAsync(20);
+      await failure;
+      expect(disconnects).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+      handlers.get("connected")?.({});
+      await chat.connect();
+      chat.disconnect();
+      expect(disconnects).toBe(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("reports transient initial errors but waits until timeout and cleans up", async () => {
+    vi.useFakeTimers();
+    try {
+      const handlers = new Map<string, (ctx: any) => void>();
+      let disconnects = 0;
+      const client: CentrifugeClient = {
+        on(event, handler) { handlers.set(event, handler); }, connect() {}, disconnect() { disconnects++; },
+        newSubscription() { throw new Error("not connected"); }, async rpc() { return { data: {} }; },
+      };
+      const chat = new RelyvoChat(credentials(), { createCentrifuge: () => client, connectTimeoutMs: 20 });
+      const errors: Error[] = [];
+      chat.on("error", error => errors.push(error));
+      const pending = chat.connect();
+      const result = expect(pending).rejects.toMatchObject({ code: "connect_timeout" });
+      await Promise.resolve();
+      handlers.get("error")?.({ error: "temporary" });
+      expect(errors).toHaveLength(1);
+      expect(disconnects).toBe(0);
+      await vi.advanceTimersByTimeAsync(20);
+      await result;
+      expect(disconnects).toBe(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("cancels a reconnect waiter and does not accept a late connected event", async () => {
+    const handlers = new Map<string, (ctx: any) => void>();
+    let disconnects = 0;
+    const client: CentrifugeClient = {
+      on(event, handler) { handlers.set(event, handler); }, connect() { handlers.get("connected")?.({}); },
+      disconnect() { disconnects++; }, newSubscription() { return { on() {}, subscribe() {}, unsubscribe() {} }; },
+      async rpc() { return { data: {} }; },
+    };
+    const chat = new RelyvoChat(credentials(), { createCentrifuge: () => client });
+    await chat.connect();
+    handlers.get("connecting")?.({});
+    const pending = chat.connect();
+    await Promise.resolve();
+    chat.disconnect();
+    await expect(pending).rejects.toMatchObject({ code: "disconnected" });
+    handlers.get("connected")?.({});
+    expect(disconnects).toBe(1);
+  });
+
+  it("forwards durable event metadata without changing legacy payloads", async () => {
+    const fake = fakeCentrifuge(() => ({ data: { ok: true, data: {} } }));
+    const chat = new RelyvoChat(credentials(), { createCentrifuge: fake.factory });
+    await chat.connect();
+    const messages: unknown[] = [];
+    const reads: unknown[] = [];
+    chat.on("message", event => messages.push(event));
+    chat.on("read", (event, metadata) => reads.push([event, metadata]));
+    const metadata = { event_id: "evt-1", occurred_at: "now" };
+    fake.publish({ ...metadata, type: "chat.message.created", data: { channel_id: CHANNEL_ID, message: { id: "m", sender_id: "u" } } });
+    const read = { channel_id: CHANNEL_ID, user_id: "u", last_read_seq: 1, last_read_at: "now" };
+    fake.publish({ ...metadata, type: "chat.message.read", data: read });
+    expect(messages[0]).toMatchObject({ eventId: "evt-1", occurredAt: "now", message: { id: "m" } });
+    expect(reads).toEqual([[read, { eventId: "evt-1", occurredAt: "now" }]]);
   });
 
   it("exposes a dispose alias", async () => {

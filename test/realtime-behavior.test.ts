@@ -354,6 +354,123 @@ describe("RelyvoRealtime", () => {
     await rejected;
   });
 
+  it("disposes terminally disconnected channels before reconnecting", async () => {
+    const { realtime, clients } = setup();
+    await realtime.connect();
+    const oldChannel = await realtime.subscribe("private-orders.123");
+    const oldHandler = vi.fn();
+    oldChannel.on("order.updated", oldHandler);
+    const oldClient = clients[0]!;
+    const oldSub = oldClient.subscriptions[0]!;
+
+    oldClient.emit("disconnected", { code: 3500 });
+    expect(realtime.status).toBe("disconnected");
+    expect(oldChannel.subscribed).toBe(false);
+    expect(oldSub.unsubscribed).toBe(true);
+    expect(oldClient.removed).toContain(oldSub);
+    const lateHandler = vi.fn();
+    oldChannel.on("order.updated", lateHandler);
+
+    await realtime.connect();
+    const newChannel = await realtime.subscribe("private-orders.123");
+    const newHandler = vi.fn();
+    newChannel.on("order.updated", newHandler);
+    expect(newChannel).not.toBe(oldChannel);
+    expect(clients).toHaveLength(2);
+    const newSub = clients[1]!.subscriptions[0]!;
+    oldSub.publish({ event: "order.updated", data: "old" });
+    newSub.publish({ event: "order.updated", data: "new" });
+    oldClient.emit("connected", {});
+    expect(oldHandler).not.toHaveBeenCalled();
+    expect(lateHandler).not.toHaveBeenCalled();
+    expect(newHandler).toHaveBeenCalledOnce();
+    expect(newHandler).toHaveBeenCalledWith("new", { event: "order.updated" });
+    expect(realtime.status).toBe("connected");
+  });
+
+  it("cancels an in-flight subscription on terminal disconnect", async () => {
+    const { realtime, clients } = setup();
+    await realtime.connect();
+    clients[0]!.autoSubscribe = false;
+    const subscribing = realtime.subscribe("private-orders.123");
+    const rejected = expect(subscribing).rejects.toMatchObject({ code: "disconnected" });
+    await Promise.resolve();
+    const oldSub = clients[0]!.subscriptions[0]!;
+    clients[0]!.emit("disconnected", {});
+    await rejected;
+    expect(oldSub.unsubscribed).toBe(true);
+    oldSub.emit("subscribed", {});
+    await realtime.connect();
+    expect((await realtime.subscribe("private-orders.123")).subscribed).toBe(true);
+    expect(clients[1]!.subscriptions).toHaveLength(1);
+  });
+
+  it("keeps channels and the client during automatic reconnect", async () => {
+    const { realtime, clients } = setup();
+    await realtime.connect();
+    const channel = await realtime.subscribe("private-orders.123");
+    clients[0]!.emit("connecting", {});
+    expect(realtime.status).toBe("connecting");
+    const connected = vi.fn();
+    const first = realtime.connect().then(connected);
+    const second = realtime.connect();
+    await Promise.resolve();
+    expect(connected).not.toHaveBeenCalled();
+    expect(clients).toHaveLength(1);
+    expect(await realtime.subscribe("private-orders.123")).toBe(channel);
+    clients[0]!.emit("connected", {});
+    await Promise.all([first, second]);
+    expect(connected).toHaveBeenCalledOnce();
+    expect(realtime.status).toBe("connected");
+    expect(channel.subscribed).toBe(true);
+  });
+
+  it.each(["terminal", "explicit"])("rejects reconnect wait on %s disconnect", async (kind) => {
+    const { realtime, clients } = setup();
+    await realtime.connect();
+    clients[0]!.emit("connecting", {});
+    const waiting = realtime.connect();
+    const rejected = expect(waiting).rejects.toMatchObject({ code: "disconnected" });
+    if (kind === "terminal") clients[0]!.emit("disconnected", {});
+    else await realtime.disconnect();
+    await rejected;
+  });
+
+  it("times out reconnect wait without replacing the retrying client", async () => {
+    vi.useFakeTimers();
+    try {
+      const { realtime, clients } = setup();
+      const initial = realtime.connect();
+      await vi.runAllTicks();
+      await initial;
+      clients[0]!.emit("connecting", {});
+      const waiting = realtime.connect();
+      const rejected = expect(waiting).rejects.toMatchObject({ code: "connect_timeout" });
+      await vi.advanceTimersByTimeAsync(10_000);
+      await rejected;
+      expect(clients).toHaveLength(1);
+      expect(clients[0]!.disconnected).toBe(false);
+      clients[0]!.emit("connected", {});
+      expect(realtime.status).toBe("connected");
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("disposes an established channel on terminal unsubscribe", async () => {
+    const { realtime, clients } = setup();
+    await realtime.connect();
+    const old = await realtime.subscribe("private-orders.123");
+    const handler = vi.fn();
+    old.on("order.updated", handler);
+    const oldSub = clients[0]!.subscriptions[0]!;
+    oldSub.emit("unsubscribed", { code: 103 });
+    expect(old.subscribed).toBe(false);
+    expect(clients[0]!.removed).toContain(oldSub);
+    oldSub.publish({ event: "order.updated", data: "old" });
+    expect(handler).not.toHaveBeenCalled();
+    expect(await realtime.subscribe("private-orders.123")).not.toBe(old);
+    expect(clients[0]!.subscriptions).toHaveLength(2);
+  });
+
   it("unsubscribes and disconnects cleanly", async () => {
     const { realtime, clients } = setup();
     await realtime.connect();

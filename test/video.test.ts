@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { Room } from "livekit-client";
 
 import { RelyvoCall, RelyvoError } from "../src/index.js";
 import type { RoomLike } from "../src/video.js";
@@ -132,6 +133,20 @@ describe("RelyvoCall", () => {
     await expect(call.listDevices("videoinput")).resolves.toEqual(devices);
     await expect(call.switchDevice("audioinput", "mic-1")).resolves.toBe(true);
     expect(fake.calls.devices).toEqual([{ kind: "audioinput", deviceId: "mic-1" }]);
+  });
+
+  it("forwards device permission preference to the default LiveKit enumerator", async () => {
+    const fake = fakeRoom();
+    const enumerate = vi.spyOn(Room, "getLocalDevices").mockResolvedValue([]);
+    try {
+      const call = await RelyvoCall.connect(credentials, { createRoom: () => fake.room });
+      await call.listDevices("audioinput", false);
+      await call.listDevices("videoinput", true);
+      expect(enumerate).toHaveBeenNthCalledWith(1, "audioinput", false);
+      expect(enumerate).toHaveBeenNthCalledWith(2, "videoinput", true);
+    } finally {
+      enumerate.mockRestore();
+    }
   });
 
   it("exposes participants and a consistent dispose alias", async () => {
