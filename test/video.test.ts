@@ -11,6 +11,7 @@ function fakeRoom(options: { failConnect?: boolean } = {}) {
     screen: [] as boolean[],
     listeners: [] as { event: string; handler: (...args: any[]) => void }[],
     disconnected: 0,
+    devices: [] as { kind: string; deviceId: string }[],
   };
 
   const room: RoomLike = {
@@ -24,6 +25,10 @@ function fakeRoom(options: { failConnect?: boolean } = {}) {
     on(event, handler) {
       calls.listeners.push({ event, handler });
       return room;
+    },
+    async switchActiveDevice(kind, deviceId) {
+      calls.devices.push({ kind, deviceId });
+      return true;
     },
     remoteParticipants: new Map([["remote-1", { identity: "remote-1" }]]),
     localParticipant: {
@@ -115,6 +120,18 @@ describe("RelyvoCall", () => {
     expect(count).toBe(0);
     fake.calls.listeners.find((item) => item.event === "disconnected")!.handler();
     await expect(call.enableMicrophone()).rejects.toMatchObject({ code: "not_connected" });
+  });
+
+  it("lists and switches media devices after connecting", async () => {
+    const fake = fakeRoom();
+    const devices = [{ deviceId: "cam-1", kind: "videoinput", label: "Camera", groupId: "g", toJSON: () => ({}) }] as unknown as MediaDeviceInfo[];
+    const call = await RelyvoCall.connect(credentials, {
+      createRoom: () => fake.room,
+      getDevices: async (kind) => { expect(kind).toBe("videoinput"); return devices; },
+    });
+    await expect(call.listDevices("videoinput")).resolves.toEqual(devices);
+    await expect(call.switchDevice("audioinput", "mic-1")).resolves.toBe(true);
+    expect(fake.calls.devices).toEqual([{ kind: "audioinput", deviceId: "mic-1" }]);
   });
 
   it("exposes participants and a consistent dispose alias", async () => {

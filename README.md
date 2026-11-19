@@ -153,8 +153,8 @@ connection and cleans up its subscriptions. `dispose()` is an alias.
 
 ### `RelyvoCall.connect({ serverUrl, token }, options?)`
 
-Methods: `enableCamera()`, `enableMicrophone()`, `shareScreen()`, `on(event, handler)`,
-`disconnect()`, `dispose()` (alias). `call.room` exposes the underlying LiveKit
+Methods: `enableCamera()`, `enableMicrophone()`, `shareScreen()`, `listDevices()`,
+`switchDevice()`, `on(event, handler)`, `disconnect()`, `dispose()` (alias). `call.room` exposes the underlying LiveKit
 room when you need something this wrapper does not cover. `isConnected`,
 `localParticipant`, and `remoteParticipants` expose read-only connection and
 participant state; remote identities are not an authorization source.

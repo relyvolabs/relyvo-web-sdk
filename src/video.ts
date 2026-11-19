@@ -15,6 +15,8 @@ export interface RoomLike {
   };
   /** LiveKit exposes the remote participant map on the room. */
   remoteParticipants?: Map<string, unknown>;
+  /** Selects an input/output device where the underlying room supports it. */
+  switchActiveDevice?(kind: MediaDeviceKind, deviceId: string): Promise<boolean>;
 }
 
 export type RoomFactory = () => RoomLike;
@@ -37,6 +39,8 @@ const EVENT_NAMES: Record<CallEvent, RoomEvent> = {
 export interface RelyvoCallOptions {
   /** Injectable room, used by tests. */
   createRoom?: RoomFactory;
+  /** Injectable device enumerator, used by tests or a custom media stack. */
+  getDevices?: (kind: MediaDeviceKind, requestPermissions?: boolean) => Promise<MediaDeviceInfo[]>;
 }
 
 /**
@@ -48,11 +52,13 @@ export interface RelyvoCallOptions {
  */
 export class RelyvoCall {
   readonly room: RoomLike;
+  private readonly getDevices: (kind: MediaDeviceKind, requestPermissions?: boolean) => Promise<MediaDeviceInfo[]>;
   private connected = false;
   private disconnectVersion = 0;
 
-  private constructor(room: RoomLike) {
+  private constructor(room: RoomLike, getDevices: (kind: MediaDeviceKind, requestPermissions?: boolean) => Promise<MediaDeviceInfo[]>) {
     this.room = room;
+    this.getDevices = getDevices;
     room.on(RoomEvent.Disconnected, () => {
       this.connected = false;
       this.disconnectVersion++;
@@ -83,7 +89,10 @@ export class RelyvoCall {
       throw new RelyvoError("invalid_credentials", "serverUrl and token are required");
     }
 
-    const call = new RelyvoCall((options.createRoom ?? defaultFactory)());
+    const call = new RelyvoCall(
+      (options.createRoom ?? defaultFactory)(),
+      options.getDevices ?? ((kind) => Room.getLocalDevices(kind)),
+    );
 
     try {
       await call.room.connect(credentials.serverUrl, credentials.token);
@@ -111,6 +120,29 @@ export class RelyvoCall {
   async enableMicrophone(enabled = true): Promise<void> {
     this.requireConnected();
     await this.room.localParticipant.setMicrophoneEnabled(enabled);
+  }
+
+  /** Lists local audio/video devices; permission may be requested by the browser. */
+  async listDevices(kind: MediaDeviceKind = "videoinput", requestPermissions = false): Promise<MediaDeviceInfo[]> {
+    this.requireConnected();
+    try {
+      return await this.getDevices(kind, requestPermissions);
+    } catch (cause) {
+      throw new RelyvoError("device_list_failed", "local media devices could not be listed", cause);
+    }
+  }
+
+  /** Switches the active camera, microphone or speaker for subsequent media. */
+  async switchDevice(kind: MediaDeviceKind, deviceId: string): Promise<boolean> {
+    this.requireConnected();
+    if (!this.room.switchActiveDevice) {
+      throw new RelyvoError("unsupported", "this media room does not support device selection");
+    }
+    try {
+      return await this.room.switchActiveDevice(kind, deviceId);
+    } catch (cause) {
+      throw new RelyvoError("device_switch_failed", "the media device could not be selected", cause);
+    }
   }
 
   /** Starts or stops screen sharing where the browser supports it. */
