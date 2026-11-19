@@ -14,7 +14,9 @@ import type {
 
 /** The subset of the Centrifuge client this SDK depends on. */
 export interface CentrifugeSubscription {
-  subscribe(): Promise<unknown>;
+  subscribe(): Promise<unknown> | void;
+  /** Resolves when the server confirms the subscription, when supported. */
+  ready?(timeout?: number): Promise<void>;
   unsubscribe(): void;
   on(event: "publication" | "subscribed" | "error", handler: (ctx: any) => void): void;
 }
@@ -90,6 +92,12 @@ export class RelyvoChat {
   };
   private typingSubscription?: CentrifugeSubscription;
   private conversationSubscription?: CentrifugeSubscription;
+  private connecting?: Promise<void>;
+  private ready = false;
+  private generation = 0;
+  private cancelConnect?: (error: RelyvoError) => void;
+  private connectionSucceeded?: () => void;
+  private connectionFailed?: (error: RelyvoError) => void;
 
   constructor(credentials: ChatCredentials, options: RelyvoChatOptions = {}) {
     this.credentials = credentials;
@@ -102,51 +110,114 @@ export class RelyvoChat {
         : { getToken: options.getConnectionToken }),
     });
 
-    this.client.on("connected", () => this.emit("connected"));
-    this.client.on("disconnected", (ctx) => this.emit("disconnected", ctx?.reason));
-    this.client.on("error", (ctx) =>
-      this.emit("error", new RelyvoError("transport_error", String(ctx?.error ?? "connection error"))),
-    );
+    this.client.on("connected", () => {
+      this.connectionSucceeded?.();
+      this.emit("connected");
+    });
+    this.client.on("disconnected", (ctx) => {
+      this.stop(false);
+      this.emit("disconnected", ctx?.reason);
+    });
+    this.client.on("error", (ctx) => {
+      const error = new RelyvoError("transport_error", String(ctx?.error ?? "connection error"));
+      this.connectionFailed?.(error);
+      this.emit("error", error);
+    });
   }
 
   /** Opens the socket and subscribes to the conversation and typing channels. */
   async connect(): Promise<void> {
-    const connected = new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(
-        () => reject(new RelyvoError("connect_timeout", "the realtime connection timed out")),
-        this.connectTimeoutMs,
-      );
-
-      this.handlers.connected.add(() => {
-        clearTimeout(timer);
-        resolve();
-      });
-      this.handlers.error.add((error) => {
-        clearTimeout(timer);
-        reject(error);
-      });
-    });
-
-    this.client.connect();
-    await connected;
-
-    this.conversationSubscription = this.client.newSubscription(
-      this.credentials.channel,
-      this.subscriptionTokenOptions(this.credentials.channel, this.credentials.subscriptionToken),
+    if (this.ready) return;
+    if (this.connecting) return this.connecting;
+    const generation = ++this.generation;
+    const cancelled = new Promise<never>((_, reject) => { this.cancelConnect = reject; });
+    // Defer transport callbacks until the shared operation has been installed.
+    const operation = Promise.resolve().then(() =>
+      this.generation === generation ? this.open(generation, cancelled) : cancelled,
     );
-    this.conversationSubscription.on("publication", (ctx) => this.handlePublication(ctx?.data));
-    await this.conversationSubscription.subscribe();
+    this.connecting = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.generation === generation) {
+        this.connecting = undefined;
+        this.cancelConnect = undefined;
+      }
+    }
+  }
 
-    if (this.credentials.typingChannel && this.credentials.typingSubscriptionToken) {
-      this.typingSubscription = this.client.newSubscription(
-        this.credentials.typingChannel,
-        this.subscriptionTokenOptions(
-          this.credentials.typingChannel,
-          this.credentials.typingSubscriptionToken,
-        ),
-      );
-      this.typingSubscription.on("publication", (ctx) => this.handleTyping(ctx?.data));
-      await this.typingSubscription.subscribe();
+  private async open(generation: number, cancelled: Promise<never>): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const connected = new Promise<void>((resolve, reject) => {
+      this.connectionSucceeded = resolve;
+      this.connectionFailed = reject;
+      timer = setTimeout(() => reject(new RelyvoError("connect_timeout", "the realtime connection timed out")), this.connectTimeoutMs);
+    });
+    try {
+      const connection = Promise.race([connected, cancelled]);
+      try {
+        this.client.connect();
+      } catch (error) {
+        // The race is already observing cancellation; consume it if connect throws.
+        void connection.catch(() => {});
+        throw error;
+      }
+      await connection;
+      this.assertCurrent(generation);
+      clearTimeout(timer);
+      this.connectionSucceeded = undefined;
+      this.connectionFailed = undefined;
+      if (!this.conversationSubscription) {
+        this.conversationSubscription = this.client.newSubscription(
+          this.credentials.channel,
+          this.subscriptionTokenOptions(this.credentials.channel, this.credentials.subscriptionToken),
+        );
+        this.conversationSubscription.on("publication", (ctx) => {
+          if (this.ready || this.connecting) this.handlePublication(ctx?.data);
+        });
+      }
+      await this.subscribe(this.conversationSubscription, cancelled, generation);
+      this.assertCurrent(generation);
+      if (this.credentials.typingChannel && this.credentials.typingSubscriptionToken) {
+        if (!this.typingSubscription) {
+          this.typingSubscription = this.client.newSubscription(
+            this.credentials.typingChannel,
+            this.subscriptionTokenOptions(this.credentials.typingChannel, this.credentials.typingSubscriptionToken),
+          );
+          this.typingSubscription.on("publication", (ctx) => {
+            if (this.ready || this.connecting) this.handleTyping(ctx?.data);
+          });
+        }
+        await this.subscribe(this.typingSubscription, cancelled, generation);
+        this.assertCurrent(generation);
+      }
+      this.ready = true;
+    } catch (error) {
+      if (this.generation === generation) {
+        try { this.disconnect(); } catch { /* Preserve the original connection failure. */ }
+      }
+      if (error instanceof RelyvoError) throw error;
+      throw new RelyvoError("transport_error", "the realtime connection could not be established", error);
+    } finally {
+      clearTimeout(timer);
+      if (this.generation === generation) {
+        this.connectionSucceeded = undefined;
+        this.connectionFailed = undefined;
+      }
+    }
+  }
+
+  private async subscribe(subscription: CentrifugeSubscription, cancelled: Promise<never>, generation: number): Promise<void> {
+    await Promise.race([Promise.resolve(subscription.subscribe()), cancelled]);
+    this.assertCurrent(generation);
+    if (subscription.ready) {
+      await Promise.race([subscription.ready(this.connectTimeoutMs), cancelled]);
+    }
+  }
+
+  private assertCurrent(generation: number): void {
+    if (generation !== this.generation) {
+      throw new RelyvoError("disconnected", "the realtime connection was closed");
     }
   }
 
@@ -197,9 +268,28 @@ export class RelyvoChat {
   }
 
   disconnect(): void {
-    this.conversationSubscription?.unsubscribe();
-    this.typingSubscription?.unsubscribe();
-    this.client.disconnect();
+    this.stop(true);
+  }
+
+  private stop(disconnectClient: boolean): void {
+    if (!this.ready && !this.connecting && !this.cancelConnect) return;
+    ++this.generation;
+    this.ready = false;
+    this.connecting = undefined;
+    const cancel = this.cancelConnect;
+    this.cancelConnect = undefined;
+    this.connectionSucceeded = undefined;
+    this.connectionFailed = undefined;
+    cancel?.(new RelyvoError("disconnected", "the realtime connection was closed"));
+    try {
+      this.conversationSubscription?.unsubscribe();
+    } finally {
+      try {
+        this.typingSubscription?.unsubscribe();
+      } finally {
+        if (disconnectClient) this.client.disconnect();
+      }
+    }
   }
 
   /** Channel id extracted from the subscription channel name. */

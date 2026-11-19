@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { RelyvoChat, RelyvoError } from "../src/index.js";
 import type { CentrifugeClient } from "../src/chat.js";
@@ -240,6 +240,162 @@ describe("RelyvoChat", () => {
       method: "chat.unread",
       data: { channel_id: CHANNEL_ID },
     });
+  });
+
+  it("waits for server subscription readiness and cleans up readiness failures", async () => {
+    let connected: (ctx: any) => void = () => {};
+    let resolveReady: () => void = () => {};
+    let rejectReady: (reason: unknown) => void = () => {};
+    let notifyReady: () => void = () => {};
+    let readyStarted = new Promise<void>((resolve) => { notifyReady = resolve; });
+    let unsubscribed = 0;
+    let disconnects = 0;
+    const client: CentrifugeClient = {
+      on(event, handler) { if (event === "connected") connected = handler; },
+      connect() { connected({}); },
+      disconnect() { disconnects++; },
+      newSubscription() {
+        return {
+          on() {}, subscribe() {}, unsubscribe() { unsubscribed++; },
+          ready(timeout) {
+            expect(timeout).toBe(10000);
+            notifyReady();
+            return new Promise<void>((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+          },
+        };
+      },
+      async rpc() { return { data: {} }; },
+    };
+    const chat = new RelyvoChat(credentials(), { createCentrifuge: () => client });
+    let settled = false;
+    const first = chat.connect().then(() => { settled = true; });
+    await readyStarted;
+    expect(settled).toBe(false);
+    resolveReady();
+    await first;
+    chat.disconnect();
+    readyStarted = new Promise<void>((resolve) => { notifyReady = resolve; });
+    const retry = chat.connect();
+    await readyStarted;
+    const cause = { code: 1, message: "timeout" };
+    rejectReady(cause);
+    await expect(retry).rejects.toMatchObject({ name: "RelyvoError", code: "transport_error", cause });
+    expect(unsubscribed).toBe(2);
+    expect(disconnects).toBe(2);
+  });
+
+  it("handles reentrant disconnect and synchronous transport failure before retry", async () => {
+    let connected: (ctx: any) => void = () => {};
+    let throws = true;
+    let subscriptions = 0;
+    const client: CentrifugeClient = {
+      on(event, handler) { if (event === "connected") connected = handler; },
+      connect() { if (throws) throw new Error("connect failed"); connected({}); },
+      disconnect() {},
+      newSubscription() { subscriptions++; return { on() {}, unsubscribe() {}, subscribe() {} }; },
+      async rpc() { return { data: {} }; },
+    };
+    const chat = new RelyvoChat(credentials(), { createCentrifuge: () => client });
+    await expect(chat.connect()).rejects.toMatchObject({ code: "transport_error", cause: expect.objectContaining({ message: "connect failed" }) });
+    throws = false;
+    const off = chat.on("connected", () => chat.disconnect());
+    await expect(chat.connect()).rejects.toMatchObject({ code: "disconnected" });
+    expect(subscriptions).toBe(0);
+    off();
+    await chat.connect();
+    expect(subscriptions).toBe(1);
+  });
+
+  it("can reconnect after a terminal transport disconnection", async () => {
+    let connected: (ctx: any) => void = () => {};
+    let disconnected: (ctx: any) => void = () => {};
+    let connects = 0;
+    let subscribes = 0;
+    const client: CentrifugeClient = {
+      on(event, handler) { if (event === "connected") connected = handler; if (event === "disconnected") disconnected = handler; },
+      connect() { connects++; connected({}); }, disconnect() {},
+      newSubscription() { return { on() {}, unsubscribe() {}, subscribe() { subscribes++; } }; },
+      async rpc() { return { data: {} }; },
+    };
+    const chat = new RelyvoChat(credentials(), { createCentrifuge: () => client });
+    await chat.connect();
+    disconnected({ reason: "server closed" });
+    await chat.connect();
+    expect(connects).toBe(2);
+    expect(subscribes).toBe(2);
+  });
+
+  it("cleans up a timed out connection and can retry", async () => {
+    vi.useFakeTimers();
+    try {
+      let handler: (ctx: any) => void = () => {};
+      let succeed = false;
+      let disconnects = 0;
+      const client: CentrifugeClient = {
+        on(event, cb) { if (event === "connected") handler = cb; },
+        connect() { if (succeed) handler({}); },
+        disconnect() { disconnects++; },
+        newSubscription() { return { on() {}, unsubscribe() {}, async subscribe() {} }; },
+        async rpc() { return { data: {} }; },
+      };
+      const chat = new RelyvoChat(credentials(), { createCentrifuge: () => client, connectTimeoutMs: 25 });
+      const pending = chat.connect();
+      const failure = expect(pending).rejects.toMatchObject({ code: "connect_timeout" });
+      await vi.advanceTimersByTimeAsync(25);
+      await failure;
+      expect(disconnects).toBe(1);
+      expect(vi.getTimerCount()).toBe(0);
+      succeed = true;
+      await chat.connect();
+      chat.disconnect();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("coalesces concurrent connects and reuses subscriptions after disconnect", async () => {
+    const fake = fakeCentrifuge(() => ({ data: { ok: true, data: {} } }));
+    const chat = new RelyvoChat(credentials(), { createCentrifuge: fake.factory });
+    await Promise.all([chat.connect(), chat.connect()]);
+    await chat.connect();
+    expect(fake.state.subscriptions).toHaveLength(1);
+    chat.disconnect();
+    chat.disconnect();
+    await chat.connect();
+    expect(fake.state.disconnectCount).toBe(1);
+    expect(fake.state.subscriptions).toHaveLength(1);
+  });
+
+  it("cancels an in-flight subscription and ignores its late completion", async () => {
+    let connected: (ctx: any) => void = () => {};
+    let finish: () => void = () => {};
+    let notifyStarted: () => void = () => {};
+    let started = new Promise<void>((resolve) => { notifyStarted = resolve; });
+    let subscriptions = 0;
+    let disconnects = 0;
+    const client: CentrifugeClient = {
+      on(event, handler) { if (event === "connected") connected = handler; },
+      connect() { connected({}); },
+      disconnect() { disconnects++; },
+      newSubscription() {
+        subscriptions++;
+        return { on() {}, unsubscribe() {}, subscribe: () => new Promise<void>((resolve) => { finish = resolve; notifyStarted(); }) };
+      },
+      async rpc() { return { data: {} }; },
+    };
+    const chat = new RelyvoChat(credentials(), { createCentrifuge: () => client });
+    const pending = chat.connect();
+    await started;
+    chat.disconnect();
+    await expect(pending).rejects.toMatchObject({ code: "disconnected" });
+    finish();
+    started = new Promise<void>((resolve) => { notifyStarted = resolve; });
+    const retry = chat.connect();
+    await started;
+    finish();
+    await retry;
+    expect(subscriptions).toBe(1);
+    expect(disconnects).toBe(1);
   });
 
   it("disconnects the transport", async () => {

@@ -91,9 +91,29 @@ describe("RelyvoCall", () => {
       seen.push(participant.identity);
     });
 
-    expect(fake.calls.listeners[0]?.event).toBe("participantConnected");
-    fake.calls.listeners[0]?.handler({ identity: "user_7" });
+    const listener = fake.calls.listeners.find((item) => item.event === "participantConnected");
+    expect(listener).toBeDefined();
+    listener?.handler({ identity: "user_7" });
     expect(seen).toEqual(["user_7"]);
+  });
+
+  it("cleans up after a failed connection", async () => {
+    const fake = fakeRoom({ failConnect: true });
+    await expect(RelyvoCall.connect(credentials, { createRoom: () => fake.room })).rejects.toMatchObject({ code: "connect_failed" });
+    expect(fake.calls.disconnected).toBe(1);
+  });
+
+  it("blocks media after a remote disconnect and unsubscribes without off", async () => {
+    const fake = fakeRoom();
+    const call = await RelyvoCall.connect(credentials, { createRoom: () => fake.room });
+    let count = 0;
+    const unsubscribe = call.on("participantConnected", () => count++);
+    const listener = fake.calls.listeners.find((item) => item.event === "participantConnected")!;
+    unsubscribe();
+    listener.handler({});
+    expect(count).toBe(0);
+    fake.calls.listeners.find((item) => item.event === "disconnected")!.handler();
+    await expect(call.enableMicrophone()).rejects.toMatchObject({ code: "not_connected" });
   });
 
   it("disconnects once", async () => {

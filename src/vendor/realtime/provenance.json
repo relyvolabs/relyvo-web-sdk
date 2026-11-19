@@ -1,0 +1,9 @@
+{
+  "source": "relyvo-realtime/sdk/javascript/src",
+  "commit": "00ae77cde90c484a159e4df5179a34f4ae5f62aa",
+  "source_dirty": false,
+  "files": {
+    "index.ts": "9cffeb90262e53f641fbeccbb08a6073585d2e50d7cbe883ba846a50633326d6",
+    "types.ts": "b90ffd5c504ecfb4069a72f955568a31b613db9b95d173e1658505037d8a10d1"
+  }
+}

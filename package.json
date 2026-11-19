@@ -1,7 +1,7 @@
 {
   "name": "@relyvolabs/web-sdk",
-  "version": "0.1.2",
-  "description": "Browser client SDK for Relyvo: realtime chat over Centrifugo and video calls over LiveKit, with no REST and no API key in the browser.",
+  "version": "0.2.0",
+  "description": "Browser SDK for Relyvo Call, Chat and Realtime with short-lived credentials and no API key in the browser.",
   "license": "UNLICENSED",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -9,14 +9,50 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./call": {
+      "import": {
+        "types": "./dist/call.d.ts",
+        "default": "./dist/call.js"
+      },
+      "require": {
+        "types": "./dist/call.d.cts",
+        "default": "./dist/call.cjs"
+      }
+    },
+    "./chat": {
+      "import": {
+        "types": "./dist/chat.d.ts",
+        "default": "./dist/chat.js"
+      },
+      "require": {
+        "types": "./dist/chat.d.cts",
+        "default": "./dist/chat.cjs"
+      }
+    },
+    "./realtime": {
+      "import": {
+        "types": "./dist/realtime.d.ts",
+        "default": "./dist/realtime.js"
+      },
+      "require": {
+        "types": "./dist/realtime.d.cts",
+        "default": "./dist/realtime.cjs"
+      }
     }
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "sideEffects": false,
   "engines": {
@@ -35,10 +71,13 @@
     "url": "git+https://github.com/relyvolabs/relyvo-web-sdk.git"
   },
   "scripts": {
-    "build": "tsup",
+    "build": "node scripts/sync-realtime.mjs --check && tsup",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "pack:check": "npm pack --dry-run"
+    "pack:check": "npm pack --dry-run",
+    "realtime:check": "node scripts/sync-realtime.mjs --check",
+    "realtime:check-upstream": "node scripts/sync-realtime.mjs --check-upstream",
+    "realtime:update": "node scripts/sync-realtime.mjs --update"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

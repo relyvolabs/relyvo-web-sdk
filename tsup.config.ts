@@ -1,7 +1,7 @@
 import { defineConfig } from "tsup";
 
 export default defineConfig({
-  entry: ["src/index.ts"],
+  entry: { index: "src/index.ts", call: "src/call.ts", chat: "src/chat-entry.ts", realtime: "src/realtime.ts" },
   format: ["esm", "cjs"],
   target: "es2020",
   dts: true,

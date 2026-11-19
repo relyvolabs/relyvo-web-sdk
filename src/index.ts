@@ -1,10 +1,10 @@
 /**
  * Relyvo browser client SDK.
  *
- * The browser holds only short-lived credentials minted by your backend: a
- * Centrifugo connection token for chat and a LiveKit participant token for
- * media. Chat operations travel as RPC frames on the WebSocket, so this SDK
- * never calls Relyvo REST and never needs a CORS allowance.
+ * The browser holds only short-lived credentials minted by your backend.
+ * Call uses a LiveKit participant token, Chat uses Centrifugo RPC, and Realtime
+ * uses a tenant-scoped event credential bundle. The project API key never
+ * belongs in browser code.
  *
  * @example
  * ```ts
@@ -39,4 +39,6 @@ export type {
   TypingEvent,
 } from "./types.js";
 
-export const VERSION = "0.1.2";
+export * from "./realtime.js";
+
+export const VERSION = "0.2.0";

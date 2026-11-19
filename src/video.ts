@@ -47,9 +47,14 @@ export interface RelyvoCallOptions {
 export class RelyvoCall {
   readonly room: RoomLike;
   private connected = false;
+  private disconnectVersion = 0;
 
   private constructor(room: RoomLike) {
     this.room = room;
+    room.on(RoomEvent.Disconnected, () => {
+      this.connected = false;
+      this.disconnectVersion++;
+    });
   }
 
   /** Connects to the room the token was minted for. */
@@ -65,7 +70,13 @@ export class RelyvoCall {
 
     try {
       await call.room.connect(credentials.serverUrl, credentials.token);
+      if (call.disconnectVersion !== 0) throw new Error("room disconnected during connection");
     } catch (cause) {
+      try {
+        await call.room.disconnect();
+      } catch {
+        // Preserve the connection failure even if best-effort cleanup fails.
+      }
       throw new RelyvoError("connect_failed", "the media connection could not be established", cause);
     }
 
@@ -97,12 +108,16 @@ export class RelyvoCall {
   /** Subscribes to a room event. Returns an unsubscribe function. */
   on(event: CallEvent, handler: (...args: any[]) => void): () => void {
     const name = EVENT_NAMES[event];
-    this.room.on(name, handler);
+    let active = true;
+    const wrapped = (...args: any[]) => { if (active) handler(...args); };
+    this.room.on(name, wrapped);
     return () => {
+      if (!active) return;
+      active = false;
       const target = this.room as unknown as {
         off?: (event: string, callback: (...args: any[]) => void) => void;
       };
-      target.off?.(name, handler);
+      target.off?.(name, wrapped);
     };
   }
 
@@ -110,7 +125,12 @@ export class RelyvoCall {
   disconnect(): void {
     if (!this.connected) return;
     this.connected = false;
-    void this.room.disconnect();
+    // The public method is intentionally synchronous; consume asynchronous cleanup failures.
+    try {
+      void Promise.resolve(this.room.disconnect()).catch(() => {});
+    } catch {
+      // The room is already considered disconnected even if cleanup throws.
+    }
   }
 
   private requireConnected(): void {
