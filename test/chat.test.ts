@@ -398,6 +398,14 @@ describe("RelyvoChat", () => {
     expect(disconnects).toBe(1);
   });
 
+  it("exposes a dispose alias", async () => {
+    const fake = fakeCentrifuge(() => ({ data: { ok: true, data: {} } }));
+    const chat = new RelyvoChat(credentials(), { createCentrifuge: fake.factory });
+    await chat.connect();
+    chat.dispose();
+    expect(fake.state.disconnectCount).toBe(1);
+  });
+
   it("disconnects the transport", async () => {
     const fake = fakeCentrifuge(() => ({ data: { ok: true, data: {} } }));
     const chat = new RelyvoChat(credentials(), { createCentrifuge: fake.factory });

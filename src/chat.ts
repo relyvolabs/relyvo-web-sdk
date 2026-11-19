@@ -271,6 +271,11 @@ export class RelyvoChat {
     this.stop(true);
   }
 
+  /** Alias consistent with the other SDK resources. */
+  dispose(): void {
+    this.disconnect();
+  }
+
   private stop(disconnectClient: boolean): void {
     if (!this.ready && !this.connecting && !this.cancelConnect) return;
     ++this.generation;

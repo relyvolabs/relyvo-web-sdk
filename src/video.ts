@@ -13,6 +13,8 @@ export interface RoomLike {
     setMicrophoneEnabled(enabled: boolean): Promise<void>;
     setScreenShareEnabled(enabled: boolean): Promise<void>;
   };
+  /** LiveKit exposes the remote participant map on the room. */
+  remoteParticipants?: Map<string, unknown>;
 }
 
 export type RoomFactory = () => RoomLike;
@@ -55,6 +57,21 @@ export class RelyvoCall {
       this.connected = false;
       this.disconnectVersion++;
     });
+  }
+
+  /** Whether this wrapper currently has a live room connection. */
+  get isConnected(): boolean {
+    return this.connected;
+  }
+
+  /** The local participant, for access to the underlying media tracks. */
+  get localParticipant(): RoomLike["localParticipant"] {
+    return this.room.localParticipant;
+  }
+
+  /** Remote participants in the current room. Do not use this to authorize users. */
+  get remoteParticipants(): ReadonlyMap<string, unknown> {
+    return this.room.remoteParticipants ?? new Map();
   }
 
   /** Connects to the room the token was minted for. */
@@ -131,6 +148,11 @@ export class RelyvoCall {
     } catch {
       // The room is already considered disconnected even if cleanup throws.
     }
+  }
+
+  /** Alias consistent with the other SDK resources. */
+  dispose(): void {
+    this.disconnect();
   }
 
   private requireConnected(): void {

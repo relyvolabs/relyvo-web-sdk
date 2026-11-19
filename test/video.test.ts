@@ -25,6 +25,7 @@ function fakeRoom(options: { failConnect?: boolean } = {}) {
       calls.listeners.push({ event, handler });
       return room;
     },
+    remoteParticipants: new Map([["remote-1", { identity: "remote-1" }]]),
     localParticipant: {
       async setCameraEnabled(enabled) {
         calls.camera.push(enabled);
@@ -114,6 +115,17 @@ describe("RelyvoCall", () => {
     expect(count).toBe(0);
     fake.calls.listeners.find((item) => item.event === "disconnected")!.handler();
     await expect(call.enableMicrophone()).rejects.toMatchObject({ code: "not_connected" });
+  });
+
+  it("exposes participants and a consistent dispose alias", async () => {
+    const fake = fakeRoom();
+    const call = await RelyvoCall.connect(credentials, { createRoom: () => fake.room });
+    expect(call.isConnected).toBe(true);
+    expect(call.localParticipant).toBe(fake.room.localParticipant);
+    expect(call.remoteParticipants.get("remote-1")).toEqual({ identity: "remote-1" });
+    call.dispose();
+    expect(call.isConnected).toBe(false);
+    expect(fake.calls.disconnected).toBe(1);
   });
 
   it("disconnects once", async () => {

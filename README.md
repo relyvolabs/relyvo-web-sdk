@@ -123,7 +123,7 @@ scope come from the connection token; the SDK never sends a project or user id.
 | `typingChannel` / `typingSubscriptionToken` | Optional typing sibling |
 
 Methods: `connect()`, `on(event, handler)`, `send()`, `history()`, `unread()`,
-`markRead()`, `channels()`, `disconnect()`.
+`markRead()`, `channels()`, `disconnect()`, `dispose()` (alias).
 
 ### Token refresh
 
@@ -149,13 +149,15 @@ server: a browser cannot mint these tokens.
 Events: `connected`, `disconnected`, `message`, `typing`, `error`.
 
 Chat coalesces concurrent `connect()` calls; `disconnect()` cancels an in-flight
-connection and cleans up its subscriptions.
+connection and cleans up its subscriptions. `dispose()` is an alias.
 
 ### `RelyvoCall.connect({ serverUrl, token }, options?)`
 
 Methods: `enableCamera()`, `enableMicrophone()`, `shareScreen()`, `on(event, handler)`,
-`disconnect()`. `call.room` exposes the underlying LiveKit room when you need
-something this wrapper does not cover.
+`disconnect()`, `dispose()` (alias). `call.room` exposes the underlying LiveKit
+room when you need something this wrapper does not cover. `isConnected`,
+`localParticipant`, and `remoteParticipants` expose read-only connection and
+participant state; remote identities are not an authorization source.
 
 Events: `connected`, `disconnected`, `participantConnected`,
 `participantDisconnected`, `trackSubscribed`, `trackUnsubscribed`,
