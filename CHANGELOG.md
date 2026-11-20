@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0
+## 0.2.0 — 2026-11-20
 
 - Add the canonical Realtime browser client, including named-event subscriptions,
   lifecycle and credential refresh, via a generated, provenance-checked snapshot.
@@ -12,5 +12,3 @@
 - Preserve subscriptions through transient Chat and Realtime reconnects; clean up on terminal disconnect or subscription denial.
 - Forward the explicit media-device permission preference to LiveKit.
 - Document server SDK credential mapping and snapshot maintenance.
-
-No package has been published as part of this change.
